@@ -3,10 +3,11 @@ uvicorn
 pydantic
 requests
 
-moviepy[editor]
+moviepy
 imageio
 imageio-ffmpeg
 ffmpeg-python
 
 numpy
 pillow
+
