@@ -1,0 +1,4 @@
+app/uploads/
+app/clips/
+*.mp4
+__pycache__/
