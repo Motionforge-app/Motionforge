@@ -3,11 +3,12 @@ uvicorn
 pydantic
 requests
 
-moviepy
+moviepy==1.0.3
 imageio
-imageio-ffmpeg
+imageio-ffmpeg==0.4.9
 ffmpeg-python
 
 numpy
 pillow
 python-multipart
+
