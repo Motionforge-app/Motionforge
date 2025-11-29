@@ -1,10 +1,12 @@
 from fastapi import FastAPI, File, UploadFile, Query
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi import HTTPException
+
 import shutil
+import subprocess
 from pathlib import Path
 
-from moviepy.editor import VideoFileClip
 from moviepy.video.io.ffmpeg_tools import ffmpeg_extract_subclip
 
 # Basis-pad (project root)
@@ -24,9 +26,37 @@ app = FastAPI(title="MotionForge API")
 app.mount("/clips", StaticFiles(directory=str(CLIPS_DIR)), name="clips")
 
 
-# -----------------------------------------------------------
-# VIDEO SPLIT FUNCTIE - MEERDERE CLIPS (SAFE VOOR RAILWAY)
-# -----------------------------------------------------------
+# -------------------------- helpers -------------------------- #
+def get_video_duration(path: Path) -> int:
+    """
+    Haal duur (in seconden) op via ffprobe.
+    Geen MoviePy meer, alleen ffmpeg tooling.
+    """
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe failed: {result.stderr}")
+
+    try:
+        return int(float(result.stdout.strip()))
+    except Exception as e:
+        raise RuntimeError(f"Cannot parse duration: {result.stdout!r}") from e
+
+
 def split_video(
     input_path: Path,
     output_dir: Path,
@@ -34,13 +64,9 @@ def split_video(
     max_clips: int = 10,
 ):
     """
-    Knipt de video in meerdere stukken met ffmpeg (stabieler dan .subclip()).
-    - clip_length = lengte per clip in seconden
-    - max_clips = veiligheidslimiet
+    Knipt video in stukken met ffmpeg_extract_subclip.
     """
-    # Eerst alleen de duur bepalen met VideoFileClip
-    with VideoFileClip(str(input_path)) as video:
-        duration = int(video.duration)
+    duration = get_video_duration(input_path)
 
     clips: list[Path] = []
     start = 0
@@ -52,7 +78,6 @@ def split_video(
 
         print(f"DEBUG: generating clip {clip_index} from {start}s to {end}s")
 
-        # Gebruik ffmpeg_extract_subclip i.p.v. video.subclip()
         ffmpeg_extract_subclip(
             str(input_path),
             start,
@@ -67,14 +92,10 @@ def split_video(
     return clips
 
 
-# -----------------------------------------------------------
-# PROCESS PIPELINE - STABIELE BASIS (KOPIE NAAR /processed)
-# -----------------------------------------------------------
 def process_clip(input_path: Path) -> Path:
     """
-    Verwerkt één clip.
-    Nu: maak een kopie in clips/processed/ met suffix _processed.
-    Later: hier komen vertical/captions/branding etc.
+    Dummy-processing: kopieer clip naar /processed.
+    Hier komt later branding/vertical/captions.
     """
     output_path = PROCESSED_DIR / f"{input_path.stem}_processed.mp4"
     shutil.copy2(input_path, output_path)
@@ -82,9 +103,7 @@ def process_clip(input_path: Path) -> Path:
     return output_path
 
 
-# -----------------------------------------------------------
-# SIMPLE FRONTEND
-# -----------------------------------------------------------
+# -------------------------- frontend -------------------------- #
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return """
@@ -199,9 +218,7 @@ async def index():
     """
 
 
-# -----------------------------------------------------------
-# UPLOAD ENDPOINT
-# -----------------------------------------------------------
+# -------------------------- API -------------------------- #
 @app.post("/upload")
 async def upload_video(
     file: UploadFile = File(...),
@@ -212,19 +229,24 @@ async def upload_video(
         le=60,
     ),
 ):
+    # Safety: geen idiote bestanden op free tier
+    if file.size and file.size > 300 * 1024 * 1024:  # 300 MB
+        raise HTTPException(status_code=400, detail="Bestand is te groot voor de server.")
+
     file_location = UPLOAD_DIR / file.filename
 
     # Sla geüploade video op
     with open(file_location, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # Split video
-    clips = split_video(file_location, CLIPS_DIR, clip_length=clip_length)
+    try:
+        clips = split_video(file_location, CLIPS_DIR, clip_length=clip_length)
+    except Exception as e:
+        # Geef de fouttekst terug zodat jij 'm ziet in de browser
+        raise HTTPException(status_code=500, detail=f"Split error: {e}")
 
-    # Process elke clip (stabiele kopie naar /processed)
     processed_clips = [process_clip(path) for path in clips]
 
-    # URLs voor frontend
     clip_urls = [f"/clips/{path.name}" for path in clips]
     processed_clip_urls = [f"/clips/processed/{path.name}" for path in processed_clips]
 
@@ -241,9 +263,6 @@ async def upload_video(
     }
 
 
-# -----------------------------------------------------------
-# HEALTH CHECK
-# -----------------------------------------------------------
 @app.get("/health")
 async def health():
     return {"status": "ok"}
