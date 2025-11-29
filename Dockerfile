@@ -1,27 +1,22 @@
+# Gebruik Python image
 FROM python:3.11-slim
 
-# Snellere, schonere Python
+# Snellere Python
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# ffmpeg voor MoviePy
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+# ffmpeg installeren
+RUN apt-get update && apt-get install -y ffmpeg && apt-get clean
 
-# Werkmap in de container
+# Werkdirectory
 WORKDIR /app
 
-# Python-deps installeren
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Dependencies kopiëren en installeren
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# App code kopiëren
-COPY . .
+# Applicatie kopiëren
+COPY . /app
 
-# Zorg dat alle mappen bestaan
-RUN mkdir -p app/uploads app/clips clips clips/processed uploads
-
-# Standaardpoort (Railway geeft zelf $PORT mee)
-EXPOSE 8000
-
-# Start FastAPI via Uvicorn
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Start FastAPI app
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
