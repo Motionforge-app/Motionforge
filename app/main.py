@@ -3,7 +3,9 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import shutil
 from pathlib import Path
-from moviepy import VideoFileClip
+
+from moviepy.editor import VideoFileClip
+from moviepy.video.io.ffmpeg_tools import ffmpeg_extract_subclip
 
 # Basis-pad (project root)
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -23,44 +25,44 @@ app.mount("/clips", StaticFiles(directory=str(CLIPS_DIR)), name="clips")
 
 
 # -----------------------------------------------------------
-# VIDEO SPLIT FUNCTIE - MEERDERE CLIPS (ZONDER AUDIO)
+# VIDEO SPLIT FUNCTIE - MEERDERE CLIPS (SAFE VOOR RAILWAY)
 # -----------------------------------------------------------
-def split_video(input_path: Path, output_dir: Path, clip_length: int = 8, max_clips: int = 10):
+def split_video(
+    input_path: Path,
+    output_dir: Path,
+    clip_length: int = 8,
+    max_clips: int = 10,
+):
     """
-    Knipt de video in meerdere stukken.
+    Knipt de video in meerdere stukken met ffmpeg (stabieler dan .subclip()).
     - clip_length = lengte per clip in seconden
     - max_clips = veiligheidslimiet
     """
-    video = VideoFileClip(str(input_path))
-    duration = int(video.duration)
+    # Eerst alleen de duur bepalen met VideoFileClip
+    with VideoFileClip(str(input_path)) as video:
+        duration = int(video.duration)
 
     clips: list[Path] = []
     start = 0
     clip_index = 1
 
-    try:
-        while start < duration and clip_index <= max_clips:
-            end = min(start + clip_length, duration)
-            output_path = output_dir / f"clip_{clip_index}.mp4"
+    while start < duration and clip_index <= max_clips:
+        end = min(start + clip_length, duration)
+        output_path = output_dir / f"clip_{clip_index}.mp4"
 
-            print(f"DEBUG: generating clip {clip_index} from {start}s to {end}s")
+        print(f"DEBUG: generating clip {clip_index} from {start}s to {end}s")
 
-            subclip = video.subclip(start, end)
-            subclip.write_videofile(
-                str(output_path),
-                codec="libx264",
-                audio=False,   # audio uit ivm MoviePy-bug
-                verbose=False,
-            )
+        # Gebruik ffmpeg_extract_subclip i.p.v. video.subclip()
+        ffmpeg_extract_subclip(
+            str(input_path),
+            start,
+            end,
+            targetname=str(output_path),
+        )
 
-            subclip.close()
-            clips.append(output_path)
-
-            start += clip_length
-            clip_index += 1
-
-    finally:
-        video.close()
+        clips.append(output_path)
+        start += clip_length
+        clip_index += 1
 
     return clips
 
