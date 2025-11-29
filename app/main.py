@@ -4,7 +4,7 @@ from typing import List
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 
 from moviepy.editor import VideoFileClip
 
@@ -25,38 +25,30 @@ app = FastAPI(title="MotionForge Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # eventueel later strenger maken
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
 # ---------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------
-
-
 def safe_filename(original_name: str) -> str:
-    """
-    Maak een veilige bestandsnaam (zonder spaties en rare tekens).
-    """
+    """Maak een veilige bestandsnaam"""
     name = original_name.replace(" ", "_")
     return "".join(c for c in name if c.isalnum() or c in ("_", "-", "."))
 
 
 def split_video(input_path: Path, clip_length: int) -> List[str]:
-    """
-    Split een video op in stukjes van `clip_length` seconden.
-    - audio staat UIT (workaround voor MoviePy / multi-clip issues)
-    - GEEN gebruik meer van 'targetname' keyword
-    """
-    logger.info(f"Start splitting video: {input_path} in chunks of {clip_length}s")
+    """Split video in clips van N seconden, zonder audio (stabieler op Railway)."""
+    logger.info(f"Start splitting: {input_path} in chunks of {clip_length}s")
 
     if not input_path.exists():
-        raise RuntimeError(f"Input file does not exist: {input_path}")
+        raise RuntimeError(f"Input file not found: {input_path}")
 
     try:
-        # audio=False om audio-problemen te vermijden (stabieler op Railway)
         video = VideoFileClip(str(input_path), audio=False)
     except Exception as e:
         raise RuntimeError(f"Failed to open video: {e}")
@@ -64,61 +56,48 @@ def split_video(input_path: Path, clip_length: int) -> List[str]:
     duration = float(video.duration or 0)
     if duration <= 0:
         video.close()
-        raise RuntimeError(f"Video has invalid duration: {duration}")
+        raise RuntimeError("Invalid video duration")
 
-    logger.info(f"Video duration: {duration:.2f}s")
-
-    clips_created: List[str] = []
+    clips_created = []
     start = 0.0
     index = 1
 
     try:
         while start < duration:
             end = min(start + clip_length, duration)
-            logger.info(f"Creating subclip {index}: {start:.2f}s -> {end:.2f}s")
+            logger.info(f"Clip {index}: {start:.2f}s → {end:.2f}s")
 
             subclip = video.subclip(start, end)
-
             output_name = f"{input_path.stem}_part{index}.mp4"
             output_path = SPLIT_DIR / output_name
 
-            # BELANGRIJK: geen 'targetname=' meer, gewoon filename als 1e arg
             subclip.write_videofile(
                 str(output_path),
                 codec="libx264",
-                audio=False,      # audio uit voor stabiliteit
+                audio=False,
                 remove_temp=True,
                 logger=None,
             )
 
             clips_created.append(output_name)
-            index += 1
             start = end
+            index += 1
 
-        logger.info(f"Finished splitting. Created {len(clips_created)} clips.")
+        video.close()
         return clips_created
 
     except Exception as e:
+        video.close()
         logger.exception("Error during splitting")
         raise RuntimeError(f"Error while splitting video: {e}")
-
-    finally:
-        video.close()
 
 
 # ---------------------------------------------------------
 # Routes
 # ---------------------------------------------------------
-
-
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "MotionForge backend running"}
-
-
-@app.get("/health")
-async def health():
-    return {"status": "healthy"}
 
 
 @app.post("/upload")
@@ -126,13 +105,7 @@ async def upload_video(
     file: UploadFile = File(...),
     clip_length: int = Query(4, description="Length of each clip in seconds"),
 ):
-    """
-    Upload 1 video en split deze in clips van `clip_length` seconden.
-    Frontend roept dit aan als:
-      POST /upload?clip_length=4
-    met 1 bestand in 'file'.
-    """
-    logger.info(f"Received upload: filename={file.filename}, clip_length={clip_length}")
+    logger.info(f"Received upload: {file.filename} (clip_length={clip_length})")
 
     if clip_length <= 0:
         raise HTTPException(status_code=400, detail="clip_length must be > 0")
@@ -146,38 +119,49 @@ async def upload_video(
             content = await file.read()
             buffer.write(content)
 
-        logger.info(f"Saved file to {input_path} ({len(content)} bytes)")
+        logger.info(f"Saved to {input_path} ({len(content)} bytes)")
 
-        # video splitten
+        # splitten
         try:
             clips = split_video(input_path, clip_length)
         except Exception as e:
             logger.exception("Split error")
-            # Dit is de fout die jij in de frontend ziet
             raise HTTPException(status_code=500, detail=f"Split error: {e}")
 
-        return JSONResponse(
-            {
-                "status": "ok",
-                "message": "Video split successfully",
-                "original": filename,
-                "clips": clips,
-            }
-        )
+        return JSONResponse({
+            "status": "ok",
+            "message": "Video split successfully",
+            "original": filename,
+            "clips": clips,
+        })
 
     except HTTPException:
-        # al geformatteerde fout
         raise
     except Exception as e:
-        logger.exception("Unexpected error in /upload")
+        logger.exception("Upload error")
         raise HTTPException(status_code=500, detail=f"Upload error: {e}")
 
 
 @app.get("/clips")
 async def list_clips():
-    """
-    Optionele endpoint voor je frontend:
-    lijst alle gegenereerde clips in de split-map.
-    """
+    """Toon alle clips in de split-map."""
     files = [f.name for f in SPLIT_DIR.glob("*.mp4")]
     return {"count": len(files), "clips": files}
+
+
+# ---------------------------------------------------------
+# NEW: Download endpoint
+# ---------------------------------------------------------
+@app.get("/download/{filename}")
+async def download_clip(filename: str):
+    """Download één clip direct vanaf Railway."""
+    file_path = SPLIT_DIR / filename
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return FileResponse(
+        path=str(file_path),
+        media_type="video/mp4",
+        filename=filename,
+    )
