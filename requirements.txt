@@ -3,7 +3,7 @@ uvicorn
 pydantic
 requests
 
-moviepy
+moviepy[editor]
 imageio
 imageio-ffmpeg
 ffmpeg-python
